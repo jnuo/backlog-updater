@@ -1,0 +1,18 @@
+# Ignore virtual environments
+venv/
+*.pyc
+__pycache__/
+
+# Ignore configuration and credentials files
+config/google_sheets_credentials.json
+config/settings.py
+
+# Ignore data files (optional, if they're only needed locally)
+data/*.csv
+data/*.xlsx
+
+# Ignore Jupyter notebooks checkpoints (if any)
+.ipynb_checkpoints/
+
+# Ignore VSCode settings (optional)
+.vscode/
