@@ -34,6 +34,120 @@ CLIENT_LABELS = {
     "movistargo": "Moviestar GO"
 }
 
+def update_resolved_dates():
+    """
+    Update the resolved dates in the Google Sheets document for tasks that are newly marked as 'Done'.
+    Also, count and print how many new resolved dates were added.
+    """
+    # Load the latest data from Jira CSV and Google Sheets
+    jira_df = read_jira_csv()
+    google_sheet_df = read_google_sheet(SPREADSHEET_DATABASE_ID, SPREADSHEET_DATABASE_MAINSHEET)
+
+    # Counter for tracking new resolved dates added
+    resolved_dates_added_count = 0
+
+    # Iterate over each row in the Jira DataFrame to find tasks with status 'Done'
+    for index, jira_row in jira_df.iterrows():
+        ticket_id = jira_row["Issue key"]
+        jira_status = jira_row["Status"]
+        resolved_date = jira_row.get("Resolved", None)  # Get the resolved date from Jira if it exists
+
+        # Check if the status is 'Done' and if we have a resolved date
+        if jira_status == "Done" and resolved_date:
+            # Find the corresponding row in Google Sheets based on the unique ticket identifier
+            google_sheet_row = google_sheet_df[google_sheet_df["TICKET"] == ticket_id]
+
+            # If the task is found and has an empty Resolved Date in Google Sheets, update it
+            if not google_sheet_row.empty and pd.isna(google_sheet_row.iloc[0]["Resolved Date"]):
+                # Update the Resolved Date in the Google Sheets DataFrame
+                google_sheet_df.loc[google_sheet_df["TICKET"] == ticket_id, "Resolved Date"] = resolved_date
+                resolved_dates_added_count += 1  # Increment the counter
+
+    # Write the updated DataFrame back to Google Sheets
+    client = authorize_google_sheets()
+    sheet = client.open_by_key(SPREADSHEET_DATABASE_ID).worksheet(SPREADSHEET_DATABASE_MAINSHEET)
+
+    # Clear the sheet before updating to avoid duplication
+    sheet.clear()
+
+    # Convert DataFrame to list and append it back to Google Sheets
+    sheet.append_rows([google_sheet_df.columns.values.tolist()] + google_sheet_df.values.tolist(), value_input_option="USER_ENTERED")
+    
+    # Print the results
+    print("Resolved dates updated successfully in Google Sheets.")
+    print(f"Total new resolved dates added: {resolved_dates_added_count}")
+
+def should_update_status(old_status, new_status):
+    """
+    Determine whether to update the status based on specific rules.
+    """
+    non_updatable_statuses = {
+        "Needs Product / Business Decision", 
+        "Out of Scope", 
+        "New UI", 
+        "Duplicate"
+    }
+    
+    # Rule: Update if the new status is "Done"
+    if new_status == "Done":
+        return True
+    
+    # Rule: Do not update if old status is in the non-updatable list
+    if old_status in non_updatable_statuses:
+        return False
+    
+    # In all other cases, allow update
+    return True
+
+def update_task_statuses():
+    """
+    Update the statuses of tasks in the Google Sheets document based on the latest Jira data.
+    Also, track and print the number of statuses changed and skipped due to rules.
+    """
+    # Load the latest data from Jira CSV and Google Sheets
+    jira_df = read_jira_csv()
+    google_sheet_df = read_google_sheet(SPREADSHEET_DATABASE_ID, SPREADSHEET_DATABASE_MAINSHEET)
+
+    # Counters for tracking changes and skips
+    changed_count = 0
+    skipped_count = 0
+
+    # Iterate over each row in the Jira DataFrame to apply the update rules
+    for index, jira_row in jira_df.iterrows():
+        ticket_id = jira_row["Issue key"]
+        new_status = jira_row["Status"]
+
+        # Find the corresponding row in Google Sheets based on the unique ticket identifier
+        google_sheet_row = google_sheet_df[google_sheet_df["TICKET"] == ticket_id]
+        
+        if not google_sheet_row.empty:
+            old_status = google_sheet_row.iloc[0]["Status"]
+
+            # Apply the status update rule
+            if should_update_status(old_status, new_status):
+                # Update the status in Google Sheets DataFrame
+                google_sheet_df.loc[google_sheet_df["TICKET"] == ticket_id, "Status"] = new_status
+                changed_count += 1  # Increment changed counter
+            else:
+                skipped_count += 1  # Increment skipped counter
+
+    # Write the updated DataFrame back to Google Sheets
+    client = authorize_google_sheets()
+    sheet = client.open_by_key(SPREADSHEET_DATABASE_ID).worksheet(SPREADSHEET_DATABASE_MAINSHEET)
+
+    # Clear the sheet before updating to avoid duplication
+    sheet.clear()
+
+    # Convert DataFrame to list and append it back to Google Sheets
+    sheet.append_rows([google_sheet_df.columns.values.tolist()] + google_sheet_df.values.tolist(), value_input_option="USER_ENTERED")
+    
+    # Print the results
+    print(f"Task statuses updated successfully in Google Sheets.")
+    print(f"Total statuses changed: {changed_count}")
+    print(f"Total statuses skipped due to rules: {skipped_count}")
+
+
+
 def calculate_sla_limit(priority):
     """
     Determine SLA Limit based on Priority.
@@ -163,6 +277,9 @@ def prepare_new_tasks(jira_df, database_df):
         "Resolved": "Resolved Date"
     })
 
+    if(len(new_tasks_df)==0):
+        return new_tasks_df
+
     # Apply transformations
     new_tasks_df["Priority"] = new_tasks_df["Priority"].apply(transform_priority)
     new_tasks_df["Creation Date"] = new_tasks_df["Creation Date"].apply(format_date)
@@ -256,5 +373,3 @@ def find_new_tasks(jira_df, database_df, jira_key_column="Issue key", database_k
 # Example usage
 if __name__ == "__main__":
     append_new_tasks_to_database()
-
-
