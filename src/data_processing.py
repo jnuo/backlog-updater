@@ -2,6 +2,7 @@
 
 import sys
 import os
+import re
 from datetime import datetime
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
@@ -52,6 +53,18 @@ def map_plugin_task_fields(row):
         "ETA": row.get("ETA")
     }
 
+def add_hyperlinks(df, column_name="Ticket"):
+    """
+    Add hyperlinks to a specific column in the DataFrame if the cell matches a ticket ID pattern.
+    """
+    base_url = "https://niceteam.atlassian.net/browse/"
+    ticket_pattern = re.compile(r"^[A-Z]+-\d+$")
+
+    for index, value in df[column_name].items():
+        if pd.notna(value) and ticket_pattern.match(value) and "\n" not in value:
+            df.at[index, column_name] = f'=HYPERLINK("{base_url}{value}", "{value}")'
+    return df
+
 def move_done_tasks_to_archive():
     """
     Remove 'Done' or 'Released' tasks from the Plugins(All) sheet and move them to the PluginDone sheet.
@@ -59,12 +72,12 @@ def move_done_tasks_to_archive():
     print("Step 6: Remove Done tasks from Key Issues - move them to Database")
 
     # Load Plugins(All) sheet data
-    plugins_df = read_google_sheet(SPREADSHEET_KEY_ISSUES_ID, SPREADSHEET_KEY_ISSUES_PLUGINSHEET)
+    plugin_key_issues_df = read_google_sheet(SPREADSHEET_KEY_ISSUES_ID, SPREADSHEET_KEY_ISSUES_PLUGINSHEET)
     # Load PluginDone sheet data for appending
-    plugin_done_df = read_google_sheet(SPREADSHEET_DATABASE_ID, SPREADSHEET_DATABASE_PLUGINDONESHEET)
+    plugin_database_done_issues_df = read_google_sheet(SPREADSHEET_DATABASE_ID, SPREADSHEET_DATABASE_PLUGINDONESHEET)
 
     # Filter for tasks with Status 'Done' or 'Released'
-    done_or_released_df = plugins_df[plugins_df["Status"].isin(["Done", "Released"])]
+    done_or_released_df = plugin_key_issues_df[plugin_key_issues_df["Status"].isin(["Done", "Released"])]
 
     # Map and append filtered tasks to PluginDone sheet
     if not done_or_released_df.empty:
@@ -72,24 +85,30 @@ def move_done_tasks_to_archive():
         archived_tasks_df = done_or_released_df.apply(map_plugin_task_fields, axis=1)
         archived_tasks_df = pd.DataFrame(archived_tasks_df.tolist())  # Ensure archived_tasks_df is a DataFrame
         # Append archived tasks to the PluginDone DataFrame
-        plugin_done_df = pd.concat([plugin_done_df, archived_tasks_df], ignore_index=True)
+        plugin_database_done_issues_df = pd.concat([plugin_database_done_issues_df, archived_tasks_df], ignore_index=True)
 
         # Replace NaN and infinite values with empty strings
-        plugin_done_df.replace([np.nan, np.inf, -np.inf], "", inplace=True)
+        plugin_database_done_issues_df.replace([np.nan, np.inf, -np.inf], "", inplace=True)
+        
+        # Add hyperlinks to the 'Ticket' column in PluginDone DataFrame
+        plugin_database_done_issues_df = add_hyperlinks(plugin_database_done_issues_df, column_name="Ticket")
 
         # Remove Done or Released tasks from Plugins(All) DataFrame
-        plugins_df = plugins_df[~plugins_df["Status"].isin(["Done", "Released"])]
+        plugin_key_issues_df = plugin_key_issues_df[~plugin_key_issues_df["Status"].isin(["Done", "Released"])]
+        
+        # Add hyperlinks to the 'Ticket' column in Plugins(All) DataFrame
+        plugin_key_issues_df = add_hyperlinks(plugin_key_issues_df, column_name="Ticket")
 
         # Write the updated PluginDone DataFrame to Google Sheets
         client = authorize_google_sheets()
         plugin_done_sheet = client.open_by_key(SPREADSHEET_DATABASE_ID).worksheet(SPREADSHEET_DATABASE_PLUGINDONESHEET)
         plugin_done_sheet.clear()
-        plugin_done_sheet.append_rows([plugin_done_df.columns.values.tolist()] + plugin_done_df.values.tolist(), value_input_option="USER_ENTERED")
+        plugin_done_sheet.append_rows([plugin_database_done_issues_df.columns.values.tolist()] + plugin_database_done_issues_df.values.tolist(), value_input_option="USER_ENTERED")
 
         # Write the updated Plugins(All) DataFrame back to Google Sheets
         plugins_sheet = client.open_by_key(SPREADSHEET_KEY_ISSUES_ID).worksheet(SPREADSHEET_KEY_ISSUES_PLUGINSHEET)
         plugins_sheet.clear()
-        plugins_sheet.append_rows([plugins_df.columns.values.tolist()] + plugins_df.values.tolist(), value_input_option="USER_ENTERED")
+        plugins_sheet.append_rows([plugin_key_issues_df.columns.values.tolist()] + plugin_key_issues_df.values.tolist(), value_input_option="USER_ENTERED")
         
         # Print summary of the operation
         print(f"\tMoved {len(done_or_released_df)} tasks to PluginDone archive and removed them from Plugins(All).")
@@ -126,6 +145,14 @@ def update_resolved_dates():
                 # Update the Resolved Date in the Google Sheets DataFrame
                 google_sheet_df.loc[google_sheet_df["Ticket"] == ticket_id, "ResolvedDate"] = resolved_date
                 resolved_dates_added_count += 1  # Increment the counter
+
+    # Additional logic
+    base_url = "https://niceteam.atlassian.net/browse/"
+    google_sheet_df["TicketId"] = google_sheet_df["Ticket"]
+    google_sheet_df["url_concat"] = base_url
+    google_sheet_df["url_text"] = base_url + google_sheet_df["Ticket"]
+    google_sheet_df["url_hyperlink"] = '=HYPERLINK("' + google_sheet_df["url_text"] + '", "' + google_sheet_df["TicketId"] + '")'
+    google_sheet_df["Ticket"] = google_sheet_df["url_hyperlink"]
 
     # Write the updated DataFrame back to Google Sheets
     client = authorize_google_sheets()
@@ -181,7 +208,7 @@ def sync_plugin_tasks():
 
     # Load the Plugins (All) sheet from the Key Issues document
     key_issues_df = read_google_sheet(SPREADSHEET_KEY_ISSUES_ID, SPREADSHEET_KEY_ISSUES_PLUGINSHEET)
-    print("\tKey Issues document loaded successfully.")
+    print(f"\tKey Issues -> {len(key_issues_df)} Plugin tasks loaded successfully.")
 
     # Define column mappings from DATABASE to Key Issues document
     column_mapper = {
@@ -218,14 +245,12 @@ def sync_plugin_tasks():
             new_row = {key_issues_col: plugin_task[db_col] if db_col in plugin_task else "" 
                for db_col, key_issues_col in column_mapper.items()}
             
-            # Use TicketId for display text and url_concat for the URL in the hyperlink
-            url = new_row["url_concat"]
-            # Check if the URL already ends with the TicketId to avoid duplication
-            if not url.endswith(new_row["TicketId"]):
-                url += new_row["TicketId"]
-
-            # Create the hyperlink using the appropriate URL
-            new_row["Ticket"] = f'=HYPERLINK("{url}", "{new_row["TicketId"]}")'
+            base_url = "https://niceteam.atlassian.net/browse/"
+            new_row["TicketId"] = new_row["Ticket"]
+            new_row["url_concat"] = base_url
+            new_row["url_text"] = base_url + new_row["Ticket"]
+            new_row["url_hyperlink"] = '=HYPERLINK("' + new_row["url_text"] + '", "' + new_row["TicketId"] + '")'
+            new_row["Ticket"] = new_row["url_hyperlink"]
 
             # Convert new_row to DataFrame and concatenate
             key_issues_df = pd.concat([key_issues_df, pd.DataFrame([new_row])], ignore_index=True)
@@ -246,6 +271,14 @@ def sync_plugin_tasks():
     key_issues_df = key_issues_df.replace([float('inf'), -float('inf')], 0)
     key_issues_df = key_issues_df.fillna("")
 
+    # Additional logic
+    base_url = "https://niceteam.atlassian.net/browse/"
+    database_df["TicketId"] = database_df["Ticket"]
+    database_df["url_concat"] = base_url
+    database_df["url_text"] = base_url + database_df["Ticket"]
+    database_df["url_hyperlink"] = '=HYPERLINK("' + database_df["url_text"] + '", "' + database_df["TicketId"] + '")'
+    database_df["Ticket"] = database_df["url_hyperlink"]
+
     # SAFEGUARD: Keep a local backup of key_issues_df
     key_issues_backup = key_issues_df.copy()
     
@@ -263,7 +296,7 @@ def sync_plugin_tasks():
         print("Error while updating Key Issues document. Restoring from backup.")
         key_issues_sheet.append_rows([key_issues_backup.columns.values.tolist()] + key_issues_backup.values.tolist(), value_input_option="USER_ENTERED")
         raise e  # Re-raise the exception to signal that something went wrong
-    
+
     # Update the DATABASE document with 'plugin-version' and 'plugin-platform'
     database_sheet = client.open_by_key(SPREADSHEET_DATABASE_ID).worksheet(SPREADSHEET_DATABASE_MAINSHEET)
     database_sheet.clear()
@@ -321,6 +354,14 @@ def categorize_tasks_by_team():
             # Update the DevTeam column in the DataFrame
             google_sheet_df.at[index, "DevTeam"] = dev_team
 
+    # Additional logic
+    base_url = "https://niceteam.atlassian.net/browse/"
+    google_sheet_df["TicketId"] = google_sheet_df["Ticket"]
+    google_sheet_df["url_concat"] = base_url
+    google_sheet_df["url_text"] = base_url + google_sheet_df["Ticket"]
+    google_sheet_df["url_hyperlink"] = '=HYPERLINK("' + google_sheet_df["url_text"] + '", "' + google_sheet_df["TicketId"] + '")'
+    google_sheet_df["Ticket"] = google_sheet_df["url_hyperlink"]
+
     # Write the updated DataFrame back to Google Sheets
     client = authorize_google_sheets()
     sheet = client.open_by_key(SPREADSHEET_DATABASE_ID).worksheet(SPREADSHEET_DATABASE_MAINSHEET)
@@ -351,6 +392,7 @@ def update_task_statuses():
 
     # Counters for tracking changes and skips
     changed_count = 0
+    stayedsame_count = 0
     skipped_count = 0
 
     # Iterate over each row in the Jira DataFrame to apply the update rules
@@ -367,11 +409,22 @@ def update_task_statuses():
             # Apply the status update rule
             if should_update_status(old_status, new_status):
                 # Update the status in Google Sheets DataFrame
-                google_sheet_df.loc[google_sheet_df["Ticket"] == ticket_id, "Status"] = new_status
-                changed_count += 1  # Increment changed counter
+                if(old_status==new_status):
+                    stayedsame_count += 1
+                else:
+                    google_sheet_df.loc[google_sheet_df["Ticket"] == ticket_id, "Status"] = new_status
+                    changed_count += 1  # Increment changed counter
             else:
                 skipped_count += 1  # Increment skipped counter
 
+    # keeping the hyperlinks
+    base_url = "https://niceteam.atlassian.net/browse/"
+    google_sheet_df["TicketId"] = google_sheet_df["Ticket"]
+    google_sheet_df["url_concat"] = base_url
+    google_sheet_df["url_text"] = base_url + google_sheet_df["Ticket"]
+    google_sheet_df["url_hyperlink"] = '=HYPERLINK("' + google_sheet_df["url_text"] + '", "' + google_sheet_df["TicketId"] + '")'
+    google_sheet_df["Ticket"] = google_sheet_df["url_hyperlink"]
+    
     # Write the updated DataFrame back to Google Sheets
     client = authorize_google_sheets()
     sheet = client.open_by_key(SPREADSHEET_DATABASE_ID).worksheet(SPREADSHEET_DATABASE_MAINSHEET)
@@ -383,9 +436,7 @@ def update_task_statuses():
     sheet.append_rows([google_sheet_df.columns.values.tolist()] + google_sheet_df.values.tolist(), value_input_option="USER_ENTERED")
     
     # Print the results
-    print(f"\tTask statuses updated successfully in Google Sheets.")
-    print(f"\tTotal statuses changed: {changed_count}")
-    print(f"\tTotal statuses skipped due to rules: {skipped_count}")
+    print(f"\tTask statuses updated w/ statuses changed: {changed_count}, same status: {stayedsame_count}, skipped due to rules: {skipped_count}")
 
 def calculate_sla_limit(priority):
     """
@@ -527,9 +578,10 @@ def prepare_new_tasks(jira_df, database_df):
     # Additional logic
     base_url = "https://niceteam.atlassian.net/browse/"
     new_tasks_df["TicketId"] = new_tasks_df["Ticket"]
-    new_tasks_df["url_concat"] = base_url + new_tasks_df["Ticket"]
-    new_tasks_df["url_text"] = '=HYPERLINK("' + new_tasks_df["url_concat"] + '", "' + new_tasks_df["TicketId"] + '")'
-    new_tasks_df["Ticket"] = new_tasks_df["url_text"]
+    new_tasks_df["url_concat"] = base_url
+    new_tasks_df["url_text"] = base_url + new_tasks_df["Ticket"]
+    new_tasks_df["url_hyperlink"] = '=HYPERLINK("' + new_tasks_df["url_text"] + '", "' + new_tasks_df["TicketId"] + '")'
+    new_tasks_df["Ticket"] = new_tasks_df["url_hyperlink"]
     
     # Calculate SLA Limit based on Priority
     new_tasks_df["SLALimit"] = new_tasks_df["Priority"].apply(calculate_sla_limit)
@@ -551,7 +603,7 @@ def prepare_new_tasks(jira_df, database_df):
         "Ticket", "Client", "Type", "Priority", "Status", "Summary",
         "CreationDate", "SLALimit", "SLADeadline", "SLAOverdueDays",
         "ResolvedDate", "DaysToComplete", "DevTeam", "Comments", 
-        "DuplicateID", "SupportSheet?", "TicketId", "url_concat", "url_text"
+        "DuplicateID", "SupportSheet?", "TicketId", "url_concat", "url_text", "url_hyperlink"
     ]
     for column in expected_columns:
         if column not in new_tasks_df.columns:
@@ -619,7 +671,7 @@ def update_backend_frontend_status():
     print("Step 7: Updating and cleaning tasks in Backend/Frontend")
 
     # Load data from Backend/Frontend and all-tasks sheets
-    backend_frontend_df = read_google_sheet(SPREADSHEET_KEY_ISSUES_ID, SPREADSHEET_KEY_ISSUES_MAINSHEET)
+    key_issues_backend_frontend_df = read_google_sheet(SPREADSHEET_KEY_ISSUES_ID, SPREADSHEET_KEY_ISSUES_MAINSHEET)
     all_tasks_df = read_google_sheet(SPREADSHEET_DATABASE_ID, SPREADSHEET_DATABASE_MAINSHEET)
 
     # Define statuses that require removal
@@ -635,7 +687,7 @@ def update_backend_frontend_status():
     removed_count = 0
 
     # Iterate over each task in the Backend/Frontend sheet
-    for index, backend_task in backend_frontend_df.iterrows():
+    for index, backend_task in key_issues_backend_frontend_df.iterrows():
         ticket_id = backend_task["Ticket"]  # Unique identifier
         backend_status = backend_task["Status"]
 
@@ -648,27 +700,27 @@ def update_backend_frontend_status():
             # Check if the status has changed
             if backend_status != latest_status:
                 # Update the status in Backend/Frontend DataFrame
-                backend_frontend_df.loc[index, "Status"] = latest_status
+                key_issues_backend_frontend_df.loc[index, "Status"] = latest_status
                 updated_count += 1
 
                 # If the updated status is in the removal list, mark the task for removal
                 if latest_status in removal_statuses:
-                    backend_frontend_df.drop(index, inplace=True)
+                    key_issues_backend_frontend_df.drop(index, inplace=True)
                     removed_count += 1
-    
-     # Regenerate hyperlinks in the Ticket column
+
+    # keeping the hyperlinks
     base_url = "https://niceteam.atlassian.net/browse/"
-    for index, row in backend_frontend_df.iterrows():
-        ticket_id = row["TicketId"]
-        if ticket_id:
-            url = base_url + ticket_id
-            backend_frontend_df.at[index, "Ticket"] = f'=HYPERLINK("{url}", "{ticket_id}")'
+    key_issues_backend_frontend_df["TicketId"] = key_issues_backend_frontend_df["Ticket"]
+    key_issues_backend_frontend_df["url_concat"] = base_url
+    key_issues_backend_frontend_df["url_text"] = base_url + key_issues_backend_frontend_df["Ticket"]
+    key_issues_backend_frontend_df["url_hyperlink"] = '=HYPERLINK("' + key_issues_backend_frontend_df["url_text"] + '", "' + key_issues_backend_frontend_df["TicketId"] + '")'
+    key_issues_backend_frontend_df["Ticket"] = key_issues_backend_frontend_df["url_hyperlink"]
 
     # Write the updated Backend/Frontend DataFrame back to Google Sheets
     client = authorize_google_sheets()
     backend_frontend_sheet = client.open_by_key(SPREADSHEET_KEY_ISSUES_ID).worksheet(SPREADSHEET_KEY_ISSUES_MAINSHEET)
     backend_frontend_sheet.clear()
-    backend_frontend_sheet.append_rows([backend_frontend_df.columns.values.tolist()] + backend_frontend_df.values.tolist(), value_input_option="USER_ENTERED")
+    backend_frontend_sheet.append_rows([key_issues_backend_frontend_df.columns.values.tolist()] + key_issues_backend_frontend_df.values.tolist(), value_input_option="USER_ENTERED")
     
     # Print summary of the operation
     print(f"\tUpdated statuses for {updated_count} tasks in Backend/Frontend.")
@@ -682,13 +734,13 @@ def reorder_backlog_backend_tasks_insert_to_key_issues():
     print("Step 8: Reordering and inserting top backend/frontend tasks into Key Issues")
 
     # Load all-tasks data from Database
-    all_tasks_df = read_google_sheet(SPREADSHEET_DATABASE_ID, SPREADSHEET_DATABASE_MAINSHEET)
+    database_all_tasks_df = read_google_sheet(SPREADSHEET_DATABASE_ID, SPREADSHEET_DATABASE_MAINSHEET)
     # Load Backend/Frontend sheet data from Key Issues for upsert
-    backend_frontend_df = read_google_sheet(SPREADSHEET_KEY_ISSUES_ID, SPREADSHEET_KEY_ISSUES_MAINSHEET)
+    key_issues_backend_frontend_df = read_google_sheet(SPREADSHEET_KEY_ISSUES_ID, SPREADSHEET_KEY_ISSUES_MAINSHEET)
 
     # Filter tasks: status is To Do or In Progress, and DevTeam is NOT Plugin
-    filtered_tasks = all_tasks_df[
-        (all_tasks_df["Status"].isin(["Backlog"
+    filtered_db_tasks = database_all_tasks_df[
+        (database_all_tasks_df["Status"].isin(["Backlog"
                                       , "Todo - Backend"
                                       , "In Dev - Backend"
                                       , "Waiting PR - Backend"
@@ -699,50 +751,51 @@ def reorder_backlog_backend_tasks_insert_to_key_issues():
                                       , "To Do"
                                       , "In Progress"
                                       , "Requires Engineering assessment"])) &
-        (all_tasks_df["DevTeam"] != "Plugin") & 
-        (~all_tasks_df["Ticket"].str.startswith("PRODREQ-"))
+        (database_all_tasks_df["DevTeam"] != "Plugin") & 
+        (~database_all_tasks_df["Ticket"].str.startswith("PRODREQ-"))
     ]
 
     # Sort by Priority and SLA Overdue Days
     priority_order = {"5-Blocker": 5, "4-Critical": 4, "3-Major": 3, "2-Minor": 2, "1-Trivial": 1}
-    filtered_tasks["PriorityOrder"] = filtered_tasks["Priority"].map(priority_order)
-    filtered_tasks = filtered_tasks.sort_values(
+    filtered_db_tasks["PriorityOrder"] = filtered_db_tasks["Priority"].map(priority_order)
+    filtered_db_tasks = filtered_db_tasks.sort_values(
         by=["PriorityOrder", "SLAOverdueDays"],
         ascending=[False, False]
     ).drop(columns=["PriorityOrder"])
 
     # Limit to top 25 tasks
-    top_tasks_df = filtered_tasks.head(25)
+    top_db_tasks_df = filtered_db_tasks.head(25)
 
     # Upsert these tasks to the Backend/Frontend sheet in Key Issues
     upserted_count = 0
-    for index, task in top_tasks_df.iterrows():
+    for index, task in top_db_tasks_df.iterrows():
         ticket_id = task["Ticket"]
         
         # Check if task already exists in the Backend/Frontend sheet
-        existing_task = backend_frontend_df[backend_frontend_df["Ticket"] == ticket_id]
+        existing_key_issue_item = key_issues_backend_frontend_df[key_issues_backend_frontend_df["Ticket"] == ticket_id]
         
-        if(existing_task.empty):
+        if(existing_key_issue_item.empty):
             # Insert new task
-            backend_frontend_df = pd.concat([backend_frontend_df, pd.DataFrame([task])], ignore_index=True)
+            key_issues_backend_frontend_df = pd.concat([key_issues_backend_frontend_df, pd.DataFrame([task])], ignore_index=True)
             upserted_count += 1
 
     # Clean up the DataFrame before writing to Google Sheets
-    backend_frontend_df.replace([float('inf'), -float('inf')], 0, inplace=True)
-    backend_frontend_df.fillna("", inplace=True)
+    key_issues_backend_frontend_df.replace([float('inf'), -float('inf')], 0, inplace=True)
+    key_issues_backend_frontend_df.fillna("", inplace=True)
 
-    # Create hyperlinks for the Ticket column
+    # keeping the hyperlinks
     base_url = "https://niceteam.atlassian.net/browse/"
-    backend_frontend_df["Ticket"] = backend_frontend_df.apply(
-        lambda row: f'=HYPERLINK("{base_url}{row["Ticket"]}", "{row["Ticket"]}")' if pd.notna(row["Ticket"]) else "",
-        axis=1
-    )
+    key_issues_backend_frontend_df["TicketId"] = key_issues_backend_frontend_df["Ticket"]
+    key_issues_backend_frontend_df["url_concat"] = base_url
+    key_issues_backend_frontend_df["url_text"] = base_url + key_issues_backend_frontend_df["Ticket"]
+    key_issues_backend_frontend_df["url_hyperlink"] = '=HYPERLINK("' + key_issues_backend_frontend_df["url_text"] + '", "' + key_issues_backend_frontend_df["TicketId"] + '")'
+    key_issues_backend_frontend_df["Ticket"] = key_issues_backend_frontend_df["url_hyperlink"]
 
     # Write the updated Backend/Frontend DataFrame back to Google Sheets
     client = authorize_google_sheets()
     backend_frontend_sheet = client.open_by_key(SPREADSHEET_KEY_ISSUES_ID).worksheet(SPREADSHEET_KEY_ISSUES_MAINSHEET)
     backend_frontend_sheet.clear()
-    backend_frontend_sheet.append_rows([backend_frontend_df.columns.values.tolist()] + backend_frontend_df.values.tolist(), value_input_option="USER_ENTERED")
+    backend_frontend_sheet.append_rows([key_issues_backend_frontend_df.columns.values.tolist()] + key_issues_backend_frontend_df.values.tolist(), value_input_option="USER_ENTERED")
     
     # Print summary of the operation
     print(f"\tUpserted top 25 tasks to Backend/Frontend. Total new tasks inserted: {upserted_count}")
