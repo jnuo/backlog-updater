@@ -17,7 +17,7 @@ def read_jira_csv(file_path=JIRA_CSV_PATH):
     """
     try:
         df = pd.read_csv(file_path)
-        print("Jira CSV file loaded successfully.")
+        print("\tJira CSV file loaded successfully.")
         return df
     except FileNotFoundError:
         print("Error: CSV file not found at specified path.")
